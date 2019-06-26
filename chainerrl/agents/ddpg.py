@@ -75,6 +75,8 @@ class DDPG(AttributeSavingMixin, BatchAgent):
         logger (Logger): Logger used
         batch_states (callable): method which makes a batch of observations.
             default is `chainerrl.misc.batch_states.batch_states`
+        clip_critic_tgt (tuple or None) : tuple containing (min, max) to clip
+            the target of the critic. If None, target will not be clipped.
         burnin_action_func (callable or None): If not None, this callable
             object is used to select actions before the model is updated
             one or more times during training.
@@ -86,7 +88,7 @@ class DDPG(AttributeSavingMixin, BatchAgent):
                         'critic_optimizer')
 
     def __init__(self, model, actor_optimizer, critic_optimizer, replay_buffer,
-                 gamma, explorer,
+                 gamma, explorer, obs_normalizer=None,
                  gpu=None, replay_start_size=50000,
                  minibatch_size=32, update_interval=1,
                  target_update_interval=10000,
@@ -99,14 +101,19 @@ class DDPG(AttributeSavingMixin, BatchAgent):
                  episodic_update_len=None,
                  logger=getLogger(__name__),
                  batch_states=batch_states,
+                 l2_action_penalty=None,
+                 clip_critic_tgt=None,
                  burnin_action_func=None,
                  ):
 
         self.model = model
+        self.obs_normalizer = obs_normalizer
 
         if gpu is not None and gpu >= 0:
             cuda.get_device(gpu).use()
             self.model.to_gpu(device=gpu)
+            if self.obs_normalizer is not None:
+                self.obs_normalizer.to_gpu(device=gpu)
 
         self.xp = self.model.xp
         self.replay_buffer = replay_buffer
@@ -137,6 +144,8 @@ class DDPG(AttributeSavingMixin, BatchAgent):
             update_interval=update_interval,
         )
         self.batch_states = batch_states
+        self.clip_critic_tgt = clip_critic_tgt
+        self.l2_action_penalty = l2_action_penalty
         self.burnin_action_func = burnin_action_func
 
         self.t = 0
@@ -204,6 +213,10 @@ class DDPG(AttributeSavingMixin, BatchAgent):
 
             target_q = batch_rewards + self.gamma * \
                 (1.0 - batch_terminal) * F.reshape(next_q, (batchsize,))
+            if self.clip_critic_tgt:
+                target_q = F.clip(target_q,
+                                  self.clip_critic_tgt[0],
+                                  self.clip_critic_tgt[1])
 
         # Estimated Q-function observes s_t and a_t
         predict_q = F.reshape(
@@ -251,6 +264,9 @@ class DDPG(AttributeSavingMixin, BatchAgent):
 
         # Since we want to maximize Q, loss is negation of Q
         loss = - F.sum(q) / batch_size
+        if self.l2_action_penalty:
+            loss += self.l2_action_penalty \
+                        * F.square(onpolicy_actions) / batch_size
 
         # Update stats
         self.average_actor_loss *= self.average_loss_decay
@@ -260,8 +276,11 @@ class DDPG(AttributeSavingMixin, BatchAgent):
 
     def update(self, experiences, errors_out=None):
         """Update the model from experiences"""
-
         batch = batch_experiences(experiences, self.xp, self.phi, self.gamma)
+        if self.obs_normalizer:
+            batch['state'] = self.obs_normalizer(batch['state'], update=False)
+            batch['next_state'] = self.obs_normalizer(batch['next_state'],
+                                                      update=False)
         self.critic_optimizer.update(lambda: self.compute_critic_loss(batch))
         self.actor_optimizer.update(lambda: self.compute_actor_loss(batch))
 
@@ -280,6 +299,11 @@ class DDPG(AttributeSavingMixin, BatchAgent):
                 transitions.append([ep[i]])
             batch = batch_experiences(
                 transitions, xp=self.xp, phi=self.phi, gamma=self.gamma)
+            if self.obs_normalizer:
+                batch['state'] = self.obs_normalizer(batch['state'],
+                                                     update=False)
+                batch['next_state'] = self.obs_normalizer(batch['state'],
+                                                          update=False)
             batches.append(batch)
 
         with self.model.state_reset(), self.target_model.state_reset():
@@ -330,6 +354,11 @@ class DDPG(AttributeSavingMixin, BatchAgent):
                 next_state=obs,
                 next_action=action,
                 is_state_terminal=False)
+            # Add to Normalizer
+            if self.obs_normalizer:
+                self.obs_normalizer(self.batch_states([obs],
+                                    self.xp,
+                                    self.phi))
 
         self.last_state = obs
         self.last_action = action
@@ -339,9 +368,10 @@ class DDPG(AttributeSavingMixin, BatchAgent):
         return self.last_action
 
     def act(self, obs):
-
         with chainer.using_config('train', False):
             s = self.batch_states([obs], self.xp, self.phi)
+            if self.obs_normalizer:
+                s = self.obs_normalizer(s, update=False)
             action = self.policy(s).sample()
             # Q is not needed here, but log it just for information
             q = self.q_function(s, action)
@@ -459,7 +489,11 @@ class DDPG(AttributeSavingMixin, BatchAgent):
             next_state=state,
             next_action=self.last_action,
             is_state_terminal=done)
-
+        # Add to Normalizer
+        if self.obs_normalizer:
+            self.obs_normalizer(self.batch_states([state],
+                                self.xp,
+                                self.phi))
         self.stop_episode()
 
     def stop_episode(self):
