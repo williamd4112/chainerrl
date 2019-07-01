@@ -85,7 +85,8 @@ class DDPG(AttributeSavingMixin, BatchAgent):
     saved_attributes = ('model',
                         'target_model',
                         'actor_optimizer',
-                        'critic_optimizer')
+                        'critic_optimizer',
+                        'obs_normalizer')
 
     def __init__(self, model, actor_optimizer, critic_optimizer, replay_buffer,
                  gamma, explorer, obs_normalizer=None,
