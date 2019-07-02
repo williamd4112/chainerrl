@@ -400,7 +400,10 @@ class SquashedGaussianDistribution(Distribution):
             _unwrap_variable(self.var).copy())
 
     def kl(self, q):
-        raise NotImplementedError
+        p = self
+        return 0.5 * F.sum(q.ln_var - p.ln_var +
+                           (p.var + (p.mean - q.mean) ** 2) / q.var -
+                           1, axis=1)
 
     def __repr__(self):
         return 'SquashedGaussianDistribution mean:{} ln_var:{} entropy:{}'.format(  # NOQA
