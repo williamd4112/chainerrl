@@ -124,6 +124,7 @@ class SoftActorCritic(AttributeSavingMixin, BatchAgent):
             entropy_target=None,
             temperature_optimizer=None,
             act_deterministically=True,
+            use_mutual_learning=False,
     ):
 
         self.policy = policy
@@ -189,6 +190,12 @@ class SoftActorCritic(AttributeSavingMixin, BatchAgent):
         self.q_func1_loss_record = collections.deque(maxlen=100)
         self.q_func2_loss_record = collections.deque(maxlen=100)
 
+        self.use_mutual_learning = use_mutual_learning
+
+    def set_mutual_learning(self, all_agents, assigned_idx):
+        self.all_agents = all_agents
+        self.assigned_idx = assigned_idx
+
     @property
     def temperature(self):
         if self.entropy_target is None:
@@ -241,6 +248,15 @@ class SoftActorCritic(AttributeSavingMixin, BatchAgent):
         loss1 = 0.5 * F.mean_squared_error(target_q, predict_q1)
         loss2 = 0.5 * F.mean_squared_error(target_q, predict_q2)
 
+        if self.use_mutual_learning:
+            for idx, agent in enumerate(self.all_agents):
+                if idx != self.assigned_idx:
+                    #self.logger.info('Mutual learn Q')
+                    other_predict_q1 = F.flatten(agent.q_func1(batch_state, batch_actions))
+                    other_predict_q2 = F.flatten(agent.q_func2(batch_state, batch_actions))
+                    loss1 += 0.5 * F.mean_squared_error(predict_q1, other_predict_q1)
+                    loss2 += 0.5 * F.mean_squared_error(predict_q2, other_predict_q2)
+
         # Update stats
         self.q1_record.extend(cuda.to_cpu(predict_q1.array))
         self.q2_record.extend(cuda.to_cpu(predict_q2.array))
@@ -269,7 +285,14 @@ class SoftActorCritic(AttributeSavingMixin, BatchAgent):
 
         entropy_term = self.temperature * log_prob[..., None]
         assert q.shape == entropy_term.shape
+
         loss = F.mean(entropy_term - q)
+        if self.use_mutual_learning:
+            for idx, agent in enumerate(self.all_agents):
+                if idx != self.assigned_idx:
+                    #self.logger.info('Mutual learn Pi')
+                    bc_loss = F.mean(agent.policy(batch_state).kl(self.policy(batch_state)))
+                    loss += bc_loss
 
         self.policy_optimizer.update(lambda: loss)
 

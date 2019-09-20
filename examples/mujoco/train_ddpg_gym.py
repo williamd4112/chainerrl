@@ -24,7 +24,7 @@ from chainerrl import policy
 from chainerrl import q_functions
 from chainerrl import replay_buffer
 
-
+import roboschool
 def main():
     import logging
     logging.basicConfig(level=logging.DEBUG)
